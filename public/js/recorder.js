@@ -1,79 +1,83 @@
-// public/js/recorder.js
-(function(window){
-    var WORKER_PATH = 'recorderWorker.js';
-  
-    var Recorder = function(source, cfg){
-      var config = cfg || {};
-      var bufferLen = config.bufferLen || 4096;
-      this.context = source.context;
-      this.node = (this.context.createScriptProcessor ||
-            this.context.createJavaScriptNode).call(this.context,
-            bufferLen, 2, 2);
-  
-      var worker = new Worker(config.workerPath || WORKER_PATH);
-      worker.postMessage({
-        command: 'init',
-        config: {
-          sampleRate: this.context.sampleRate
-        }
-      });
-      var recording = false,
-          currCallback;
-  
-      this.node.onaudioprocess = function(e){
-        if (!recording) return;
-        worker.postMessage({
-          command: 'record',
-          buffer: [
-            e.inputBuffer.getChannelData(0),
-            e.inputBuffer.getChannelData(1)
-          ]
-        });
-      };
-  
-      this.configure = function(cfg){
-        for (var prop in cfg){
-          if (cfg.hasOwnProperty(prop)){
-            config[prop] = cfg[prop];
-          }
-        }
-      };
-  
-      this.record = function(){
-        recording = true;
-      };
-  
-      this.stop = function(){
-        recording = false;
-      };
-  
-      this.clear = function(){
-        worker.postMessage({ command: 'clear' });
-      };
-  
-      this.getBuffers = function(cb) {
-        currCallback = cb || config.callback;
-        worker.postMessage({ command: 'getBuffers' });
-      };
-  
-      this.exportWAV = function(cb, type){
-        currCallback = cb || config.callback;
-        type = type || 'audio/wav';
-        if (!currCallback) throw new Error('Callback not set');
-        worker.postMessage({
-          command: 'exportWAV',
-          type: type
-        });
-        worker.onmessage = function(e){
-          var blob = e.data;
-          currCallback(blob);
+// recorder.js
+let audioContext;
+let mediaStream;
+let audioWorkletNode;
+let mediaRecorder;
+let recordedChunks = [];
+
+// 🎤 Khởi động ghi âm
+async function startRecording() {
+    try {
+        mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        audioContext = new AudioContext({ sampleRate: 8000 }); // Giảm sample rate xuống 16kHz
+        await audioContext.audioWorklet.addModule('processor.js');
+
+        const mediaStreamSource = audioContext.createMediaStreamSource(mediaStream);
+        audioWorkletNode = new AudioWorkletNode(audioContext, 'my-audio-processor');
+
+        mediaStreamSource.connect(audioWorkletNode);
+        audioWorkletNode.connect(audioContext.destination);
+
+        // Ghi dữ liệu vào MediaRecorder
+        mediaRecorder = new MediaRecorder(mediaStream, { mimeType: 'audio/wav' });
+        mediaRecorder.ondataavailable = event => {
+            if (event.data.size > 0) recordedChunks.push(event.data);
         };
-      };
-  
-      source.connect(this.node);
-      this.node.connect(this.context.destination);
-    };
-  
-    window.Recorder = Recorder;
-  })(window);
-  
+        mediaRecorder.start();
+    } catch (error) {
+        console.error("Lỗi khi khởi động ghi âm:", error);
+    }
+}
+
+// ⏹ Dừng ghi âm và xử lý file
+async function stopRecording() {
+    mediaRecorder.stop();
+    mediaStream.getTracks().forEach(track => track.stop());
+
+    // Tạo file WAV từ dữ liệu đã ghi
+    const audioBlob = new Blob(recordedChunks, { type: 'audio/wav' });
+    sendAudioToAPI(audioBlob);
+}
+
+// 🚀 Gửi file WAV lên API
+async function sendAudioToAPI(audioBlob) {
+    const formData = new FormData();
+    formData.append("file", audioBlob, "audio.wav");
+
+    try {
+        const response = await fetch("https://your-api.com/evaluate", {
+            method: "POST",
+            body: formData
+        });
+
+        if (!response.ok) {
+            throw new Error("Lỗi khi gửi file lên API");
+        }
+
+        const data = await response.json();
+        console.log("Kết quả đánh giá:", data);
+    } catch (error) {
+        console.error("Lỗi:", error);
+    }
+}
+
+// processor.js
+class MyAudioProcessor extends AudioWorkletProcessor {
+    process(inputs, outputs, parameters) {
+        const input = inputs[0];
+        const output = outputs[0];
+
+        if (input.length > 0) {
+            let inputChannel = input[0];
+            let outputChannel = output[0];
+
+            for (let i = 0; i < inputChannel.length; i++) {
+                outputChannel[i] = inputChannel[i]; // Chuyển tiếp tín hiệu âm thanh
+            }
+        }
+
+        return true; // Tiếp tục xử lý
+    }
+}
+
+registerProcessor('my-audio-processor', MyAudioProcessor);
